@@ -4,7 +4,10 @@ from __future__ import annotations
 import base64, hashlib, io, json, os, re, sys, tempfile, time, unicodedata, uuid
 from pathlib import Path
 from urllib.parse import urlsplit
-APP_VERSION = "kana-kouhitsu-1.4"
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+import datetime as dt
+APP_VERSION = "kana-kouhitsu-1.6"
 DEFAULT_HUB_URL = "https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/"
 MAX_WORKSHEET_CHARS = 60
 def to_katakana(text: str) -> str:
@@ -139,40 +142,76 @@ def generate_worksheet_pdf(text: str, script: str, orientation: str) -> bytes:
     pdf.save()
     return buf.getvalue()
 
+def _utc_timestamp(value):
+    if not isinstance(value,str) or len(value)>64:raise ValueError("invalid_time")
+    parsed=dt.datetime.fromisoformat(value.replace("Z","+00:00"))
+    if parsed.tzinfo is None:raise ValueError("invalid_time")
+    return parsed.astimezone(dt.timezone.utc).isoformat().replace("+00:00","Z")
+
+
+def sync_print_history(secrets,message):
+    token=message.get("history_token","")
+    if not isinstance(token,str) or not re.fullmatch(r"[0-9a-f]{64}",token):raise ValueError("invalid_device")
+    prints=message.get("prints",[]);awards=message.get("awards",[])
+    if not isinstance(prints,list) or not isinstance(awards,list) or len(prints)>20 or len(awards)>200:raise ValueError("invalid_batch")
+    clean_prints=[];clean_awards=[]
+    for item in prints:
+        word=normalize_worksheet_text(item["word"],item["script"])
+        if word!=item["word"] or item["orientation"] not in ("horizontal","vertical"):raise ValueError("invalid_print")
+        clean_prints.append({"print_id":str(uuid.UUID(item["print_id"])),"word":word,"script":item["script"],"orientation":item["orientation"],"printed_at":_utc_timestamp(item["printed_at"])})
+    for item in awards:
+        index=item["char_index"];character=item["character"]
+        if type(index) is not int or not 0<=index<60 or not isinstance(character,str) or not re.fullmatch(r"[ぁ-ゖァ-ヶー]",character):raise ValueError("invalid_award")
+        clean_awards.append({"print_id":str(uuid.UUID(item["print_id"])),"char_index":index,"character":character,"awarded_at":_utc_timestamp(item["awarded_at"])})
+    try:
+        url=str(secrets.get("SUPABASE_URL","")).rstrip("/")
+        key=str(secrets.get("SUPABASE_SERVICE_ROLE_KEY","") or secrets.get("SUPABASE_SECRET_KEY","") or secrets.get("SUPABASE_KEY",""))
+    except FileNotFoundError:return {"ok":False,"code":"not_configured"}
+    if not _safe_https_url(url) or not key:return {"ok":False,"code":"not_configured"}
+    payload={"p_device_hash":hashlib.sha256(("kana:print-history:v1:"+token).encode()).hexdigest(),"p_prints":clean_prints,"p_awards":clean_awards}
+    request=Request(url+"/rest/v1/rpc/kana_sync_print_history_v1",data=json.dumps(payload,ensure_ascii=False).encode(),headers={"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json"},method="POST")
+    with urlopen(request,timeout=3) as response:data=json.load(response)
+    if not isinstance(data,dict) or not all(isinstance(data.get(k),list) for k in ("prints","awards","acked_print_ids","acked_award_ids")):raise ValueError("invalid_response")
+    return {"ok":True,"code":"saved","history":data}
+
+
 def process_message(st, message):
     result={"delivery_id":message.get("delivery_id"),"ok":False,"code":"invalid_input","revision":message.get("revision")}
     try:
         uuid.UUID(str(message.get("delivery_id")))
-        if message.get("kind")=="normalize":
+        if message.get("kind")=="history_sync":
+            result.update(sync_print_history(st.secrets,message))
+        elif message.get("kind")=="normalize":
             result.update(ok=True,normalized=normalize_spoken_word(message.get("text",""),message.get("script",""),message.get("word_mode","auto")))
         elif message.get("kind")=="pdf":
             pdf=generate_worksheet_pdf(message.get("text",""),message.get("script",""),message.get("orientation",""))
-            result.update(ok=True,pdf_base64=base64.b64encode(pdf).decode("ascii"))
-    except Exception:
-        pass
+            result.update(ok=True,pdf_base64=base64.b64encode(pdf).decode("ascii"),printed_at=dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00","Z"))
+    except (HTTPError,URLError,TimeoutError):result["code"]="sync_unavailable"
+    except Exception:pass
     return result
 
 
 HTML_TEMPLATE = r'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
 :root{color-scheme:light;--blue:#315f86;--line:#ded6c9}*{box-sizing:border-box}body{margin:0;background:#f7f5ef;color:#292b2a;font:16px system-ui,-apple-system,'Yu Gothic',sans-serif}main{max-width:940px;margin:auto;padding:16px 16px 36px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:27px;margin:12px 0 20px}h2{font-size:19px;margin:0 0 20px}button,a{font:inherit;touch-action:manipulation}button,.btn{min-height:46px;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#263442;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:focus-visible,a:focus-visible{outline:3px solid #76a7d2;outline-offset:2px}button.primary{background:var(--blue);color:white;border-color:var(--blue);font-weight:700}button[aria-pressed=true]{background:#e5eff6;border:2px solid #467fa8}button:disabled{opacity:.5;cursor:default}.card{background:#fffefa;border:1px solid var(--line);border-radius:19px;padding:22px}.seg{display:flex;gap:8px;margin:8px 0 18px}.seg button{flex:1}.label{font-size:14px;color:#53616a}input{font:26px system-ui;width:100%;padding:14px;border:1px solid #b8c0c7;border-radius:12px;background:#fff;color:#20282e;margin:8px 0 10px}p{font-size:13px;color:#647078;line-height:1.7}.actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:12px 0}.status{font-size:14px;color:#53616a;min-height:22px}.candidates{display:flex;flex-wrap:wrap;gap:6px}.candidates button{font-size:16px;padding:6px 12px}.preview{background:white;aspect-ratio:210/297;width:100%;max-width:410px;margin:14px auto 22px;border:1px solid #ccc;padding:6.66%;overflow:hidden;--cell:clamp(18px,7vw,38px);--group-gap:calc(var(--cell)*.73)}.cells{display:flex}.cell{width:var(--cell);height:var(--cell);position:relative;border:1px solid #ccc;flex:none;display:grid;place-items:center;color:#b3b3b3;font-size:calc(var(--cell)*.64);font-family:serif}.cell:before,.cell:after{content:'';position:absolute;pointer-events:none}.cell:before{height:100%;border-left:1px dashed #e8e8e8;left:50%}.cell:after{width:100%;border-top:1px dashed #e8e8e8;top:50%}.cell span{z-index:1}.trace-group{display:flex;gap:calc(var(--cell)*.32)}.horizontal .trace-group{flex-direction:column;margin-bottom:var(--group-gap)}.vertical{display:flex;flex-direction:row-reverse;gap:var(--group-gap);justify-content:flex-start}.vertical .trace-group{flex-direction:row-reverse}.vertical .cells{flex-direction:column}.vertical .longmark{transform:rotate(90deg)}details{margin-top:18px}summary{cursor:pointer;font-size:14px;color:#53616a;padding:8px 0}[hidden]{display:none!important}.small{font-size:12px}.error{color:#a54232}@media(max-width:480px){main{padding:10px}.card{padding:16px}h1{font-size:24px}.preview{padding:6.66%;--cell:clamp(18px,7.5vw,38px)}header .btn{font-size:13px;padding:8px}}
  .preview.page{position:relative;aspect-ratio:210/297;padding:0;container-type:inline-size;overflow:hidden}.page .cell{font-size:6.83cqw}.preview-pages{width:100%}
-</style></head><body><main id="app"><header><span class="small">ちょこまな 学習アプリ</span><a id="hub" class="btn" target="_blank" rel="noopener noreferrer" href="https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/">← ちょこまなへ</a></header><h1>ひらがな・カタカナ</h1><section class="card"><h2>こうひつ プリント</h2>
+.print-record{border:1px solid var(--line);border-radius:14px;padding:16px;margin:16px 0}.print-record h3{margin:0 0 5px;overflow-wrap:anywhere}.char-award{display:grid;grid-template-columns:70px 1fr;align-items:center;gap:12px;padding:9px 0;border-top:1px solid #eee}.char-symbol{font-size:30px;color:#293944}.char-number{font-size:12px;color:#647078}.char-award button{font-size:15px;min-height:46px}.char-award button.earned{opacity:1;background:#fff1bf;color:#725000;border-color:#e0ba4e}.medal-summary{padding:12px;background:#fff7dc;border-radius:12px;font-weight:700}.tabs{margin-bottom:16px}.tabs button[aria-pressed=true]{background:var(--blue);border-color:var(--blue);color:#fff}
+</style></head><body><main id="app"><header><span class="small">ちょこまな 学習アプリ</span><a id="hub" class="btn" target="_blank" rel="noopener noreferrer" href="https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/">← ちょこまなへ</a></header><h1>ひらがな・カタカナ</h1><nav class="seg tabs" aria-label="ページ"><button id="makeTab" aria-pressed="true">プリントを つくる</button><button id="historyTab" aria-pressed="false">今日のプリント</button></nav><section id="makePane" class="card"><h2>こうひつ プリント</h2>
 <div class="label">もじ</div><div class="seg" id="scripts"><button data-script="hiragana" aria-pressed="true">ひらがな</button><button data-script="katakana" aria-pressed="false">カタカナ</button></div>
-<label class="label" for="word">ことばを いってね</label><input id="word" placeholder="はなすか、もじを いれてね" maxlength="120" autocomplete="off"><div class="actions"><button id="mic" class="primary" aria-pressed="false">マイクで はなす</button><span id="voice" class="status" role="status" aria-live="polite"></span></div><div id="candidates" class="candidates" aria-label="ほかの ききとり こうほ"></div>
+<label class="label" for="word">ことばを いってね</label><input id="word" placeholder="はなすか、もじを いれてね" maxlength="120" autocomplete="off"><div class="actions"><button id="mic" class="primary" aria-pressed="false">マイクで はなす</button><button id="resetWord" type="button">もじを リセット</button><span id="voice" class="status" role="status" aria-live="polite"></span></div><div id="candidates" class="candidates" aria-label="ほかの ききとり こうほ"></div>
 <details><summary>ことばの あつかい</summary><div class="seg" id="modes"><button data-mode="auto" aria-pressed="true">じどう</button><button data-mode="usual" aria-pressed="false">ふつう</button><button data-mode="playful" aria-pressed="false">おもしろ</button></div><p>おもしろい ことばは、きこえた おとを だいじにします。ちがう ときは、もじを そのまま なおせます。</p></details>
 <div class="label">かきかた</div><div class="seg" id="directions"><button data-dir="horizontal" aria-pressed="true">よこがき</button><button data-dir="vertical" aria-pressed="false">たてがき</button></div>
 <div id="info" class="status" role="status" aria-live="polite"></div><div id="previewSection" hidden><div class="label">いんさつ まえの プレビュー</div><div id="preview" class="preview horizontal"></div><p>ことばが ちがう ときは、うえの もじを なおしてね。</p><button id="pdf" class="primary">PDFを ダウンロード</button><div id="pdfStatus" class="status" role="status" aria-live="polite"></div></div>
-</section><details><summary>設定・動作ログ</summary><p>認識した言葉や音声はログに保存しません。</p><button id="logs">動作ログを ダウンロード</button></details></main>
+</section><section id="historyPane" class="card" hidden><h2>今日のプリント</h2><p id="historyDate"></p><p>PDFを だした ことばが のこります。かいた もじを みて、1もじずつ「きれいに かけた！」を おしてね。</p><div id="medalSummary" class="medal-summary" role="status" aria-live="polite"></div><div id="historyList"></div><p id="historySync" class="status" role="status"></p></section><details><summary>設定・動作ログ</summary><p>認識した言葉や音声はログに保存しません。</p><button id="logs">動作ログを ダウンロード</button></details></main>
 <script>
 'use strict';
 const $=s=>document.querySelector(s),$$=s=>Array.from(document.querySelectorAll(s));
-let script='hiragana',orientation='horizontal',mode='auto',revision=0,word='',timer=null,active=null,queue=[],lastReply='',pdfSnapshot=null;
+let script='hiragana',orientation='horizontal',mode='auto',revision=0,word='',timer=null,active=null,queue=[],lastReply='',pdfSnapshot=null,resetEpoch=0;
 let recognition=null,micWanted=false,run=0,retryTimer=null,watchdog=null,retries=0,gotResult=false,logs=[];
 const uuid=()=>crypto.randomUUID();
 function diag(type,data={}){logs.push({at:new Date().toISOString(),type,...data});logs=logs.slice(-400);try{localStorage.setItem('kana_kouhitsu_diagnostics_v11',JSON.stringify(logs))}catch{}}
 try{logs=JSON.parse(localStorage.getItem('kana_kouhitsu_diagnostics_v11')||'[]');if(!Array.isArray(logs))logs=[]}catch{}
 function height(){requestAnimationFrame(()=>parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:document.documentElement.scrollHeight},'*'))}
-function bridge(kind,fields){const m={delivery_id:uuid(),kind,...fields};if(kind==='normalize')queue=queue.filter(x=>x.kind!=='normalize');queue.push(m);pump()}
+function bridge(kind,fields){const m={delivery_id:uuid(),kind,...fields};if(kind==='normalize')queue=queue.filter(x=>x.kind!=='normalize');if(kind==='normalize'||kind==='pdf')queue.unshift(m);else queue.push(m);pump()}
 function pump(){if(active||!queue.length)return;active=queue.shift();parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:active},'*')}
 function select(group,attr,value){$$(group+' button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset[attr]===value)))}
 function normalize(s){s=String(s).normalize('NFKC').replace(/[。．、，!！?？"'「」『』（）()\[\]【】\s]/g,'');s=Array.from(s).map(x=>script==='hiragana'&&x>='ァ'&&x<='ヶ'?String.fromCharCode(x.charCodeAt(0)-96):script==='katakana'&&x>='ぁ'&&x<='ゖ'?String.fromCharCode(x.charCodeAt(0)+96):x).join('');if(!s||s.length>60||!(script==='hiragana'?/^[ぁ-ゖー]+$/:/^[ァ-ヶー]+$/).test(s))throw Error('ひらがな・カタカナで 1〜60もじ いれてね');return s}
@@ -195,10 +234,10 @@ function draw(){const out=$('#preview');out.textContent='';out.className='previe
  const span=document.createElement('span');span.textContent=ch;if(orientation==='vertical'&&ch==='ー')span.className='longmark';el.append(span);page.append(el)}}
  $('#previewSection').hidden=false;$('#pdf').disabled=false;height();diag('preview_updated',{direction:orientation,characters:Array.from(word).length})}
 function download(name,bytes,type){const url=URL.createObjectURL(new Blob([bytes],{type})),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)}
-function requestPDF(){clearTimeout(timer);if(!word||$('#previewSection').hidden)return;stopMic();pdfSnapshot={text:word,script,orientation};$('#pdf').disabled=true;$('#pdfStatus').textContent='PDFを つくっています…';bridge('pdf',pdfSnapshot)}
+function requestPDF(){clearTimeout(timer);if(!word||$('#previewSection').hidden)return;stopMic();pdfSnapshot={text:word,script,orientation,reset_epoch:resetEpoch};$('#pdf').disabled=true;$('#pdfStatus').textContent='PDFを つくっています…';bridge('pdf',pdfSnapshot)}
 function onReply(result){if(!result||!active||result.delivery_id!==active.delivery_id||result.delivery_id===lastReply)return;lastReply=result.delivery_id;const req=active;active=null;
  if(req.kind==='normalize'&&req.revision===revision&&req.text===$('#word').value&&req.script===script){if(result.ok){$('#word').value=result.normalized.text;word=result.normalized.text;$('#info').textContent='よみを かくにんしてね。ちがう ときは うえで なおせます。';draw()}else{$('#info').textContent='よみを へんかんできませんでした。かなで なおしてね。';clearPreview()}}
- if(req.kind==='pdf'){$('#pdf').disabled=false;if(result.ok){const bytes=Uint8Array.from(atob(result.pdf_base64),c=>c.charCodeAt(0));download('こうひつ_'+req.text.slice(0,20)+'.pdf',bytes,'application/pdf');$('#pdfStatus').textContent='PDFを つくりました。A4で いんさつしてね。';diag('pdf_created',{direction:req.orientation})}else{$('#pdfStatus').textContent='PDFを つくれませんでした。もういちど おしてね。';diag('pdf_error')}}pump();height()}
+ if(req.kind==='pdf'&&req.reset_epoch===resetEpoch){$('#pdf').disabled=false;if(result.ok){const bytes=Uint8Array.from(atob(result.pdf_base64),c=>c.charCodeAt(0));download('こうひつ_'+req.text.slice(0,20)+'.pdf',bytes,'application/pdf');rememberPrint(req,result.printed_at);$('#pdfStatus').textContent='PDFを つくりました。A4で いんさつしてね。';diag('pdf_created',{direction:req.orientation})}else{$('#pdfStatus').textContent='PDFを つくれませんでした。もういちど おしてね。';diag('pdf_error')}}if(req.kind==='history_sync')onHistoryReply(result);pump();height()}
 function micUI(text){$('#mic').textContent=micWanted?'マイクを とめる':'マイクで はなす';$('#mic').setAttribute('aria-pressed',String(micWanted));if(text!==undefined)$('#voice').textContent=text;height()}
 function detach(){clearTimeout(watchdog);watchdog=null;const r=recognition;recognition=null;if(r){r.onstart=r.onresult=r.onerror=r.onend=r.onspeechstart=r.onspeechend=null;try{r.abort()}catch{}}}
 function stopMic(){micWanted=false;run++;clearTimeout(retryTimer);detach();micUI('')}
@@ -220,15 +259,44 @@ function listen(token){if(!micWanted||recognition||token!==run)return;const SR=w
  r.onend=()=>{if(!current())return;const completed=gotResult;detach();if(completed){stopMic();micUI('ききとりました。')}else retry(token)};
  try{r.start();watchdog=setTimeout(()=>{if(current()){detach();retry(token)}},6000)}catch(e){diag('microphone_error',{code:e.name});detach();if(['NotAllowedError','SecurityError'].includes(e.name)){stopMic();micUI('ブラウザで マイクを きょかしてね。')}else retry(token)}
 }
+const PRINT_DB_KEY='kana_print_history_v1',PRINT_TOKEN_KEY='kana_print_history_device_v1';
+let printDB={prints:[],awards:[],ackedPrints:[],ackedAwards:[]},historyToken='',historyTimer=null,midnightTimer=null;
+const awardId=a=>a.print_id+':'+a.char_index;
+function validPrint(p){return p&&typeof p.print_id==='string'&&/^[0-9a-f-]{36}$/i.test(p.print_id)&&typeof p.word==='string'&&/^[ぁ-ゖァ-ヶー]{1,60}$/.test(p.word)&&['hiragana','katakana'].includes(p.script)&&['horizontal','vertical'].includes(p.orientation)&&Number.isFinite(Date.parse(p.printed_at))}
+function validAward(a){return a&&typeof a.print_id==='string'&&Number.isInteger(a.char_index)&&a.char_index>=0&&a.char_index<60&&typeof a.character==='string'&&/^[ぁ-ゖァ-ヶー]$/.test(a.character)&&Number.isFinite(Date.parse(a.awarded_at))}
+function mergeHistory(data){if(!data)return;const prints=new Map(printDB.prints.map(p=>[p.print_id,p]));for(const p of data.prints||[])if(validPrint(p))prints.set(p.print_id,p);printDB.prints=[...prints.values()];const awards=new Map(printDB.awards.map(a=>[awardId(a),a]));for(const a of data.awards||[]){const p=prints.get(a.print_id);if(validAward(a)&&p&&Array.from(p.word)[a.char_index]===a.character)awards.set(awardId(a),a)}printDB.awards=[...awards.values()];printDB.ackedPrints=[...new Set([...printDB.ackedPrints,...(data.ackedPrints||[])])];printDB.ackedAwards=[...new Set([...printDB.ackedAwards,...(data.ackedAwards||[])])];}
+function loadHistory(){try{return JSON.parse(localStorage.getItem(PRINT_DB_KEY)||'null')}catch{return null}}
+function persistHistory(){mergeHistory(loadHistory());try{localStorage.setItem(PRINT_DB_KEY,JSON.stringify(printDB));return true}catch{ $('#historySync').textContent='この端末に ほぞんできません。データベースへの ほぞんを ためしています。';return false}}
+function dateKey(value){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(value)),v={};parts.forEach(p=>v[p.type]=p.value);return v.year+'-'+v.month+'-'+v.day}
+function historyTab(show){$('#makePane').hidden=show;$('#historyPane').hidden=!show;$('#makeTab').setAttribute('aria-pressed',String(!show));$('#historyTab').setAttribute('aria-pressed',String(show));if(show)renderHistory();height()}
+function rememberPrint(req,printedAt){if(!printDB.prints.some(p=>p.print_id===req.delivery_id)){const p={print_id:req.delivery_id,word:req.text,script:req.script,orientation:req.orientation,printed_at:printedAt||new Date().toISOString()};if(validPrint(p))printDB.prints.push(p)}persistHistory();renderHistory();scheduleHistorySync();}
+function earnMedal(printId,index){const p=printDB.prints.find(p=>p.print_id===printId);if(!p||!Number.isInteger(index)||index<0||index>=Array.from(p.word).length)return;const key=printId+':'+index;if(printDB.awards.some(a=>awardId(a)===key))return;printDB.awards.push({print_id:printId,char_index:index,character:Array.from(p.word)[index],awarded_at:new Date().toISOString()});persistHistory();renderHistory();scheduleHistorySync();diag('character_gold_awarded',{character_index:index});}
+function renderHistory(){const today=dateKey(new Date()),list=$('#historyList');$('#historyDate').textContent=today+'（日本時間）';const prints=printDB.prints.filter(p=>dateKey(p.printed_at)===today).sort((a,b)=>Date.parse(b.printed_at)-Date.parse(a.printed_at)),ids=new Set(prints.map(p=>p.print_id)),awarded=new Set(printDB.awards.map(awardId));$('#medalSummary').textContent='🥇 今日の きんメダル：'+printDB.awards.filter(a=>ids.has(a.print_id)).length+'こ';list.textContent='';if(!prints.length){const empty=document.createElement('p');empty.textContent='今日のプリントは まだ ありません。PDFを だすと ここに のこります。';list.append(empty)}
+ for(const p of prints){const card=document.createElement('article');card.className='print-record';card.dataset.printId=p.print_id;const title=document.createElement('h3');title.textContent=p.word;const time=document.createElement('p');time.textContent=new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit'}).format(new Date(p.printed_at))+' ／ '+(p.orientation==='vertical'?'たてがき':'よこがき');card.append(title,time);Array.from(p.word).forEach((ch,index)=>{const row=document.createElement('div');row.className='char-award';const label=document.createElement('div'),number=document.createElement('div'),symbol=document.createElement('div');number.className='char-number';number.textContent=(index+1)+'もじめ';symbol.className='char-symbol';symbol.textContent=ch;label.append(number,symbol);const button=document.createElement('button');button.type='button';button.dataset.charIndex=index;button.dataset.printId=p.print_id;const gold=awarded.has(p.print_id+':'+index);button.textContent=gold?'🥇 きんメダル':'きれいに かけた！';button.disabled=gold;button.className=gold?'earned':'primary';button.setAttribute('aria-label',p.word+'、'+(index+1)+'もじめの「'+ch+'」、'+(gold?'きんメダル':'きれいに かけた'));button.onclick=()=>earnMedal(p.print_id,index);row.append(label,button);card.append(row)});list.append(card)}height();}
+function scheduleHistorySync(){clearTimeout(historyTimer);historyTimer=setTimeout(()=>syncHistory(false),100)}
+function syncHistory(force=false){if(!historyToken||queue.some(r=>r.kind==='history_sync')||active?.kind==='history_sync')return;const ackP=new Set(printDB.ackedPrints),ackA=new Set(printDB.ackedAwards),prints=printDB.prints.filter(p=>!ackP.has(p.print_id)).slice(0,20),canSave=new Set([...ackP,...prints.map(p=>p.print_id)]),awards=printDB.awards.filter(a=>!ackA.has(awardId(a))&&canSave.has(a.print_id)).slice(0,200);if(!force&&!prints.length&&!awards.length)return;$('#historySync').textContent='データを ほぞんしています…';bridge('history_sync',{history_token:historyToken,prints,awards});}
+function onHistoryReply(result){if(result.ok&&result.history){const data=result.history;mergeHistory(data);printDB.ackedPrints=[...new Set([...printDB.ackedPrints,...data.acked_print_ids,...data.prints.map(p=>p.print_id)])];printDB.ackedAwards=[...new Set([...printDB.ackedAwards,...data.acked_award_ids,...data.awards.map(awardId)])];persistHistory();renderHistory();$('#historySync').textContent='データは ほぞんずみです。';scheduleHistorySync()}else{$('#historySync').textContent=result.code==='not_configured'?'この端末に ほぞんしました。データベースの設定が必要です。':'この端末に ほぞんしました。つうしんが もどると じどうで ほぞんします。';diag('history_sync_failed',{code:result.code||'error'})}}
+function scheduleMidnight(){clearTimeout(midnightTimer);const shifted=new Date(Date.now()+9*3600000),next=Date.UTC(shifted.getUTCFullYear(),shifted.getUTCMonth(),shifted.getUTCDate()+1)-9*3600000;midnightTimer=setTimeout(()=>{renderHistory();scheduleMidnight()},Math.max(100,next-Date.now()+30));}
+function initHistory(){try{historyToken=localStorage.getItem(PRINT_TOKEN_KEY)||''}catch{}if(!/^[0-9a-f]{64}$/.test(historyToken)){const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);historyToken=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');try{localStorage.setItem(PRINT_TOKEN_KEY,historyToken)}catch{}}mergeHistory(loadHistory());renderHistory();setInterval(()=>syncHistory(false),30000);scheduleMidnight();window.addEventListener('storage',e=>{if(e.key===PRINT_DB_KEY){mergeHistory(loadHistory());renderHistory()}});document.addEventListener('visibilitychange',()=>{if(!document.hidden){renderHistory();syncHistory(true)}});}
 $('#mic').onclick=()=>{if(micWanted){stopMic();return}retries=0;micWanted=true;run++;$('#candidates').textContent='';micUI('マイクを じゅんびしています…');listen(run)};
-$('#word').addEventListener('input',()=>{if(micWanted)stopMic();$('#candidates').textContent='';clearPreview();clearTimeout(timer);revision++;timer=setTimeout(update,220)});
+function resetWord(){
+ stopMic();clearTimeout(timer);timer=null;revision++;resetEpoch++;
+ queue=queue.filter(req=>req.kind!=='normalize'&&req.kind!=='pdf');pdfSnapshot=null;
+ $('#word').value='';$('#candidates').textContent='';$('#preview').textContent='';
+ $('#info').textContent='';$('#pdfStatus').textContent='';$('#pdf').disabled=true;
+ clearPreview();diag('word_reset');
+}
+$('#resetWord').onclick=resetWord;
+$('#makeTab').onclick=()=>historyTab(false);$('#historyTab').onclick=()=>{historyTab(true);syncHistory(true)};
+$('#word').addEventListener('input' ,()=>{if(micWanted)stopMic();$('#candidates').textContent='';clearPreview();clearTimeout(timer);revision++;timer=setTimeout(update,220)});
 $$('[data-script]').forEach(b=>b.onclick=()=>{script=b.dataset.script;select('#scripts','script',script);update()});
 $$('[data-dir]').forEach(b=>b.onclick=()=>{orientation=b.dataset.dir;select('#directions','dir',orientation);if(word)draw()});
 $$('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;select('#modes','mode',mode);update()});
-$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.4',entries:logs},null,2),'application/json');
+$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.6',entries:logs},null,2),'application/json');
 window.addEventListener('message',e=>{if(e.source!==parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.chokomana_home_url?.startsWith('https://'))$('#hub').href=args.chokomana_home_url;onReply(args.result);height()});
 window.addEventListener('pagehide',stopMic);document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMic()});window.addEventListener('error',()=>diag('js_error'));new ResizeObserver(height).observe($('#app'));$$('details').forEach(x=>x.addEventListener('toggle',height));
 parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');diag('startup');height();
+initHistory();
 </script></body></html>
 '''
 
