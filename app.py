@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64, hashlib, io, json, os, re, sys, tempfile, time, unicodedata, uuid
 from pathlib import Path
 from urllib.parse import urlsplit
-APP_VERSION = "kana-kouhitsu-1.3"
+APP_VERSION = "kana-kouhitsu-1.4"
 DEFAULT_HUB_URL = "https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/"
 MAX_WORKSHEET_CHARS = 60
 def to_katakana(text: str) -> str:
@@ -58,9 +58,9 @@ def worksheet_plan(word: str, orientation: str) -> dict:
     axis = 8 if orientation == "horizontal" else 12
     bands = 6 if orientation == "horizontal" else 4
     chunks = [word[i:i+axis] for i in range(0,len(word),axis)]
-    copies = axis // len(word) if len(chunks) == 1 else 1
+    copies = (axis + 1) // (len(word) + 1) if len(chunks) == 1 else 1
     repeats = max(1,bands // len(chunks))
-    lines = [(chunk * copies).ljust(axis) for _ in range(repeats) for chunk in chunks]
+    lines = [(" ".join([chunk] * copies)).ljust(axis) for _ in range(repeats) for chunk in chunks]
     pages=[]
     for offset in range(0,len(lines),bands):
         page=[["" for _ in range(8)] for _ in range(12)]
@@ -183,8 +183,8 @@ function update(){clearTimeout(timer);revision++;const text=$('#word').value;$('
 function paperPlan(text,dir){
  const chars=Array.from(text),axis=dir==='horizontal'?8:12,bands=dir==='horizontal'?6:4,chunks=[];
  for(let i=0;i<chars.length;i+=axis)chunks.push(chars.slice(i,i+axis));
- const copies=chunks.length===1?Math.floor(axis/chars.length):1,repeats=Math.max(1,Math.floor(bands/chunks.length)),lines=[];
- for(let n=0;n<repeats;n++)for(const chunk of chunks){let line=[];for(let k=0;k<copies;k++)line.push(...chunk);while(line.length<axis)line.push('');lines.push(line)}
+ const copies=chunks.length===1?Math.floor((axis+1)/(chars.length+1)):1,repeats=Math.max(1,Math.floor(bands/chunks.length)),lines=[];
+ for(let n=0;n<repeats;n++)for(const chunk of chunks){let line=[];for(let k=0;k<copies;k++){if(k)line.push('');line.push(...chunk)}while(line.length<axis)line.push('');lines.push(line)}
  const pages=[];for(let offset=0;offset<lines.length;offset+=bands){const page=Array.from({length:12},()=>Array(8).fill(''));lines.slice(offset,offset+bands).forEach((line,band)=>line.forEach((ch,pos)=>{const row=dir==='horizontal'?band*2:pos,col=dir==='horizontal'?pos:band*2;page[row][col]=ch}));pages.push(page)}return pages;
 }
 function draw(){const out=$('#preview');out.textContent='';out.className='preview-pages';out.removeAttribute('style');
@@ -225,7 +225,7 @@ $('#word').addEventListener('input',()=>{if(micWanted)stopMic();$('#candidates')
 $$('[data-script]').forEach(b=>b.onclick=()=>{script=b.dataset.script;select('#scripts','script',script);update()});
 $$('[data-dir]').forEach(b=>b.onclick=()=>{orientation=b.dataset.dir;select('#directions','dir',orientation);if(word)draw()});
 $$('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;select('#modes','mode',mode);update()});
-$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.3',entries:logs},null,2),'application/json');
+$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.4',entries:logs},null,2),'application/json');
 window.addEventListener('message',e=>{if(e.source!==parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.chokomana_home_url?.startsWith('https://'))$('#hub').href=args.chokomana_home_url;onReply(args.result);height()});
 window.addEventListener('pagehide',stopMic);document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMic()});window.addEventListener('error',()=>diag('js_error'));new ResizeObserver(height).observe($('#app'));$$('details').forEach(x=>x.addEventListener('toggle',height));
 parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');diag('startup');height();
