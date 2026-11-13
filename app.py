@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64, hashlib, io, json, os, re, sys, tempfile, time, unicodedata, uuid
 from pathlib import Path
 from urllib.parse import urlsplit
-APP_VERSION = "kana-kouhitsu-1.2"
+APP_VERSION = "kana-kouhitsu-1.3"
 DEFAULT_HUB_URL = "https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/"
 MAX_WORKSHEET_CHARS = 60
 def to_katakana(text: str) -> str:
@@ -225,7 +225,7 @@ $('#word').addEventListener('input',()=>{if(micWanted)stopMic();$('#candidates')
 $$('[data-script]').forEach(b=>b.onclick=()=>{script=b.dataset.script;select('#scripts','script',script);update()});
 $$('[data-dir]').forEach(b=>b.onclick=()=>{orientation=b.dataset.dir;select('#directions','dir',orientation);if(word)draw()});
 $$('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;select('#modes','mode',mode);update()});
-$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.2',entries:logs},null,2),'application/json');
+$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.3',entries:logs},null,2),'application/json');
 window.addEventListener('message',e=>{if(e.source!==parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.chokomana_home_url?.startsWith('https://'))$('#hub').href=args.chokomana_home_url;onReply(args.result);height()});
 window.addEventListener('pagehide',stopMic);document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMic()});window.addEventListener('error',()=>diag('js_error'));new ResizeObserver(height).observe($('#app'));$$('details').forEach(x=>x.addEventListener('toggle',height));
 parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');diag('startup');height();
@@ -250,15 +250,14 @@ def _run_streamlit():
 </style>""",unsafe_allow_html=True)
     # Stable single HTML component; Python side does no Supabase I/O on the startup path.
     @st.cache_resource(show_spinner=False)
-    def get_component():
-        html=frontend_html()
+    def get_component(html: str):
         digest=hashlib.sha256(html.encode()).hexdigest()[:16]
         directory=Path(tempfile.gettempdir())/("chokomana_kana_component_"+digest)
         directory.mkdir(parents=True,exist_ok=True)
         index=directory/"index.html"
         if not index.exists() or index.stat().st_size!=len(html.encode()):index.write_text(html,encoding="utf-8")
         return components.declare_component("chokomana_kana_"+digest,path=str(directory))
-    component=get_component()
+    component=get_component(frontend_html())
     try:
         hub=_safe_https_url(str(st.secrets.get("CHOKOMANA_HOME_URL",DEFAULT_HUB_URL))) or DEFAULT_HUB_URL
     except Exception:hub=DEFAULT_HUB_URL
