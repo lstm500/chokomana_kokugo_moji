@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64, hashlib, io, json, os, re, sys, tempfile, time, unicodedata, uuid
 from pathlib import Path
 from urllib.parse import urlsplit
-APP_VERSION = "kana-kouhitsu-1.1"
+APP_VERSION = "kana-kouhitsu-1.2"
 DEFAULT_HUB_URL = "https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/"
 MAX_WORKSHEET_CHARS = 60
 def to_katakana(text: str) -> str:
@@ -52,12 +52,25 @@ def normalize_spoken_word(text:str,script:str,word_mode:str="auto") -> dict:
          else "ことばを かくにんしてね。ふたしかな ことばは かってに なおしません。")}
 
 def worksheet_plan(word: str, orientation: str) -> dict:
-    if orientation not in ("horizontal","vertical"):raise ValueError("invalid_orientation")
-    if not 1<=len(word)<=MAX_WORKSHEET_CHARS:raise ValueError("invalid_length")
-    repeats=3 if len(word)<=3 else (2 if len(word)<=9 else 1)
-    max_per_line=8 if orientation=="horizontal" else 11
-    chunks=[word[i:i+max_per_line] for i in range(0,len(word),max_per_line)]
-    return {"word":word,"orientation":orientation,"repeats":repeats,"chunks":chunks,"max_per_line":max_per_line}
+    """Fill each A4 page with 8 x 12 writing cells, alternating trace/practice."""
+    if orientation not in ("horizontal", "vertical"):raise ValueError("invalid_orientation")
+    if not 1 <= len(word) <= MAX_WORKSHEET_CHARS:raise ValueError("invalid_length")
+    axis = 8 if orientation == "horizontal" else 12
+    bands = 6 if orientation == "horizontal" else 4
+    chunks = [word[i:i+axis] for i in range(0,len(word),axis)]
+    copies = axis // len(word) if len(chunks) == 1 else 1
+    repeats = max(1,bands // len(chunks))
+    lines = [(chunk * copies).ljust(axis) for _ in range(repeats) for chunk in chunks]
+    pages=[]
+    for offset in range(0,len(lines),bands):
+        page=[["" for _ in range(8)] for _ in range(12)]
+        for band,line in enumerate(lines[offset:offset+bands]):
+            for pos,ch in enumerate(line):
+                row,col=(band*2,pos) if orientation=="horizontal" else (pos,band*2)
+                page[row][col]=ch.strip()
+        pages.append(page)
+    return {"word":word,"orientation":orientation,"repeats":repeats*copies,
+            "chunks":chunks,"max_per_line":axis,"pages":pages}
 
 def _register_pdf_font() -> str:
     """IPAexG ships as a pip dependency; no user's font file is redistributed."""
@@ -98,8 +111,7 @@ def generate_worksheet_pdf(text: str, script: str, orientation: str) -> bytes:
     pdf.setTitle("こうひつ れんしゅう")
     width,height=A4
     margin=14*mm
-    cell=min(23*mm,(width-2*margin)/8.4)
-    row_step=cell*1.32
+    cell=min(23*mm,(width-2*margin)/8,(height-2*margin)/12)
     grid=Color(.77,.77,.77)
     guide=Color(.91,.91,.91)
     trace=Color(.70,.70,.70)
@@ -118,28 +130,12 @@ def generate_worksheet_pdf(text: str, script: str, orientation: str) -> bytes:
                 pdf.drawCentredString(0,-cell*.29,ch);pdf.restoreState()
             else:pdf.drawCentredString(x+cell/2,y+cell*.21,ch)
 
-    if orientation=="horizontal":
-        y=height-margin-cell
-        for repeat in range(plan["repeats"]):
-            for chunk in plan["chunks"]:
-                if y < margin+cell*1.35:
-                    pdf.showPage();y=height-margin-cell
-                # A faint tracing row followed by an empty row for independent writing.
-                for i,char in enumerate(chunk):box(margin+i*cell,y,char)
-                y-=row_step
-                for i in range(len(chunk)):box(margin+i*cell,y,None)
-                y-=row_step*1.3
-    else:
-        # Japanese columns from right to left, trace column then blank column.
-        x=width-margin-cell
-        for repeat in range(plan["repeats"]):
-            for chunk in plan["chunks"]:
-                if x < margin+cell:
-                    pdf.showPage();x=width-margin-cell
-                for i,char in enumerate(chunk):box(x,height-margin-(i+1)*cell,char)
-                x-=row_step
-                for i in range(len(chunk)):box(x,height-margin-(i+1)*cell,None)
-                x-=row_step*1.30
+    for page_index,page in enumerate(plan["pages"]):
+        if page_index:pdf.showPage()
+        for row in range(12):
+            for col in range(8):
+                x=margin+col*cell if orientation=="horizontal" else width-margin-(col+1)*cell
+                box(x,height-margin-(row+1)*cell,page[row][col] or None)
     pdf.save()
     return buf.getvalue()
 
@@ -159,7 +155,7 @@ def process_message(st, message):
 
 HTML_TEMPLATE = r'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
 :root{color-scheme:light;--blue:#315f86;--line:#ded6c9}*{box-sizing:border-box}body{margin:0;background:#f7f5ef;color:#292b2a;font:16px system-ui,-apple-system,'Yu Gothic',sans-serif}main{max-width:940px;margin:auto;padding:16px 16px 36px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:27px;margin:12px 0 20px}h2{font-size:19px;margin:0 0 20px}button,a{font:inherit;touch-action:manipulation}button,.btn{min-height:46px;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#263442;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:focus-visible,a:focus-visible{outline:3px solid #76a7d2;outline-offset:2px}button.primary{background:var(--blue);color:white;border-color:var(--blue);font-weight:700}button[aria-pressed=true]{background:#e5eff6;border:2px solid #467fa8}button:disabled{opacity:.5;cursor:default}.card{background:#fffefa;border:1px solid var(--line);border-radius:19px;padding:22px}.seg{display:flex;gap:8px;margin:8px 0 18px}.seg button{flex:1}.label{font-size:14px;color:#53616a}input{font:26px system-ui;width:100%;padding:14px;border:1px solid #b8c0c7;border-radius:12px;background:#fff;color:#20282e;margin:8px 0 10px}p{font-size:13px;color:#647078;line-height:1.7}.actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:12px 0}.status{font-size:14px;color:#53616a;min-height:22px}.candidates{display:flex;flex-wrap:wrap;gap:6px}.candidates button{font-size:16px;padding:6px 12px}.preview{background:white;aspect-ratio:210/297;width:100%;max-width:410px;margin:14px auto 22px;border:1px solid #ccc;padding:6.66%;overflow:hidden;--cell:clamp(18px,7vw,38px);--group-gap:calc(var(--cell)*.73)}.cells{display:flex}.cell{width:var(--cell);height:var(--cell);position:relative;border:1px solid #ccc;flex:none;display:grid;place-items:center;color:#b3b3b3;font-size:calc(var(--cell)*.64);font-family:serif}.cell:before,.cell:after{content:'';position:absolute;pointer-events:none}.cell:before{height:100%;border-left:1px dashed #e8e8e8;left:50%}.cell:after{width:100%;border-top:1px dashed #e8e8e8;top:50%}.cell span{z-index:1}.trace-group{display:flex;gap:calc(var(--cell)*.32)}.horizontal .trace-group{flex-direction:column;margin-bottom:var(--group-gap)}.vertical{display:flex;flex-direction:row-reverse;gap:var(--group-gap);justify-content:flex-start}.vertical .trace-group{flex-direction:row-reverse}.vertical .cells{flex-direction:column}.vertical .longmark{transform:rotate(90deg)}details{margin-top:18px}summary{cursor:pointer;font-size:14px;color:#53616a;padding:8px 0}[hidden]{display:none!important}.small{font-size:12px}.error{color:#a54232}@media(max-width:480px){main{padding:10px}.card{padding:16px}h1{font-size:24px}.preview{padding:6.66%;--cell:clamp(18px,7.5vw,38px)}header .btn{font-size:13px;padding:8px}}
- .preview.page{position:relative;aspect-ratio:210/297;padding:0;container-type:inline-size;overflow:hidden}.page .cell{font-size:5.55cqw}.preview-pages{width:100%}
+ .preview.page{position:relative;aspect-ratio:210/297;padding:0;container-type:inline-size;overflow:hidden}.page .cell{font-size:6.83cqw}.preview-pages{width:100%}
 </style></head><body><main id="app"><header><span class="small">ちょこまな 学習アプリ</span><a id="hub" class="btn" target="_blank" rel="noopener noreferrer" href="https://chokomana-hkgx4uyxxezjtr2sj35jwj.streamlit.app/">← ちょこまなへ</a></header><h1>ひらがな・カタカナ</h1><section class="card"><h2>こうひつ プリント</h2>
 <div class="label">もじ</div><div class="seg" id="scripts"><button data-script="hiragana" aria-pressed="true">ひらがな</button><button data-script="katakana" aria-pressed="false">カタカナ</button></div>
 <label class="label" for="word">ことばを いってね</label><input id="word" placeholder="はなすか、もじを いれてね" maxlength="120" autocomplete="off"><div class="actions"><button id="mic" class="primary" aria-pressed="false">マイクで はなす</button><span id="voice" class="status" role="status" aria-live="polite"></span></div><div id="candidates" class="candidates" aria-label="ほかの ききとり こうほ"></div>
@@ -184,16 +180,20 @@ function clearPreview(){word='';$('#previewSection').hidden=true;height()}
 function update(){clearTimeout(timer);revision++;const text=$('#word').value;$('#pdfStatus').textContent='';if(!text.trim()){clearPreview();$('#info').textContent='';return}
  if(/[\u3400-\u9fff\uf900-\ufaff]/.test(text)){clearPreview();$('#info').textContent='かなに なおしています…';bridge('normalize',{text,script,word_mode:mode,revision});return}
  try{word=normalize(text);$('#word').value=word;$('#info').textContent='';draw()}catch(e){clearPreview();$('#info').textContent=e.message}}
+function paperPlan(text,dir){
+ const chars=Array.from(text),axis=dir==='horizontal'?8:12,bands=dir==='horizontal'?6:4,chunks=[];
+ for(let i=0;i<chars.length;i+=axis)chunks.push(chars.slice(i,i+axis));
+ const copies=chunks.length===1?Math.floor(axis/chars.length):1,repeats=Math.max(1,Math.floor(bands/chunks.length)),lines=[];
+ for(let n=0;n<repeats;n++)for(const chunk of chunks){let line=[];for(let k=0;k<copies;k++)line.push(...chunk);while(line.length<axis)line.push('');lines.push(line)}
+ const pages=[];for(let offset=0;offset<lines.length;offset+=bands){const page=Array.from({length:12},()=>Array(8).fill(''));lines.slice(offset,offset+bands).forEach((line,band)=>line.forEach((ch,pos)=>{const row=dir==='horizontal'?band*2:pos,col=dir==='horizontal'?pos:band*2;page[row][col]=ch}));pages.push(page)}return pages;
+}
 function draw(){const out=$('#preview');out.textContent='';out.className='preview-pages';out.removeAttribute('style');
- const mm=72/25.4,W=595.275590551,H=841.88976378,margin=14*mm,cell=Math.min(23*mm,(W-2*margin)/8.4),step=cell*1.32;
- const chars=Array.from(word),n=chars.length,count=n<=3?3:n<=9?2:1,max=orientation==='horizontal'?8:11;let page;
- const newPage=()=>{page=document.createElement('div');page.className='preview page';out.append(page)};
- const box=(x,y,ch)=>{const el=document.createElement('div');el.className='cell';Object.assign(el.style,{position:'absolute',left:(x/W*100)+'%',top:((H-y-cell)/H*100)+'%',width:(cell/W*100)+'%',height:(cell/H*100)+'%'});const span=document.createElement('span');span.textContent=ch||'';if(orientation==='vertical'&&ch==='ー')span.className='longmark';el.append(span);page.append(el)};
- newPage();let x=W-margin-cell,y=H-margin-cell;
- for(let repeat=0;repeat<count;repeat++)for(let i=0;i<n;i+=max){const chunk=chars.slice(i,i+max);
- if(orientation==='horizontal'){if(y<margin+cell*1.35){newPage();y=H-margin-cell}chunk.forEach((ch,j)=>box(margin+j*cell,y,ch));y-=step;chunk.forEach((ch,j)=>box(margin+j*cell,y,''));y-=step*1.3}
- else{if(x<margin+cell){newPage();x=W-margin-cell}chunk.forEach((ch,j)=>box(x,H-margin-(j+1)*cell,ch));x-=step;chunk.forEach((ch,j)=>box(x,H-margin-(j+1)*cell,''));x-=step*1.3}}
- $('#previewSection').hidden=false;$('#pdf').disabled=false;height();diag('preview_updated',{direction:orientation,characters:n})}
+ const mm=72/25.4,W=595.275590551,H=841.88976378,margin=14*mm,cell=Math.min(23*mm,(W-2*margin)/8,(H-2*margin)/12);
+ for(const cells of paperPlan(word,orientation)){const page=document.createElement('div');page.className='preview page';out.append(page);
+ for(let row=0;row<12;row++)for(let col=0;col<8;col++){const ch=cells[row][col],x=orientation==='horizontal'?margin+col*cell:W-margin-(col+1)*cell;
+ const el=document.createElement('div');el.className='cell';Object.assign(el.style,{position:'absolute',left:(x/W*100)+'%',top:((margin+row*cell)/H*100)+'%',width:(cell/W*100)+'%',height:(cell/H*100)+'%'});
+ const span=document.createElement('span');span.textContent=ch;if(orientation==='vertical'&&ch==='ー')span.className='longmark';el.append(span);page.append(el)}}
+ $('#previewSection').hidden=false;$('#pdf').disabled=false;height();diag('preview_updated',{direction:orientation,characters:Array.from(word).length})}
 function download(name,bytes,type){const url=URL.createObjectURL(new Blob([bytes],{type})),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)}
 function requestPDF(){clearTimeout(timer);if(!word||$('#previewSection').hidden)return;stopMic();pdfSnapshot={text:word,script,orientation};$('#pdf').disabled=true;$('#pdfStatus').textContent='PDFを つくっています…';bridge('pdf',pdfSnapshot)}
 function onReply(result){if(!result||!active||result.delivery_id!==active.delivery_id||result.delivery_id===lastReply)return;lastReply=result.delivery_id;const req=active;active=null;
@@ -225,7 +225,7 @@ $('#word').addEventListener('input',()=>{if(micWanted)stopMic();$('#candidates')
 $$('[data-script]').forEach(b=>b.onclick=()=>{script=b.dataset.script;select('#scripts','script',script);update()});
 $$('[data-dir]').forEach(b=>b.onclick=()=>{orientation=b.dataset.dir;select('#directions','dir',orientation);if(word)draw()});
 $$('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;select('#modes','mode',mode);update()});
-$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.1',entries:logs},null,2),'application/json');
+$('#pdf').onclick=requestPDF;$('#logs').onclick=()=>download('kana_diagnostics.json',JSON.stringify({app_version:'kana-kouhitsu-1.2',entries:logs},null,2),'application/json');
 window.addEventListener('message',e=>{if(e.source!==parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.chokomana_home_url?.startsWith('https://'))$('#hub').href=args.chokomana_home_url;onReply(args.result);height()});
 window.addEventListener('pagehide',stopMic);document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMic()});window.addEventListener('error',()=>diag('js_error'));new ResizeObserver(height).observe($('#app'));$$('details').forEach(x=>x.addEventListener('toggle',height));
 parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');diag('startup');height();
@@ -246,7 +246,7 @@ def _run_streamlit():
         [data-testid='stMain']{background:#f7f5ef}
         [data-testid='stVerticalBlock']{gap:0!important}
         iframe[title^='chokomana_kana']{border:none!important}
-     .preview.page{position:relative;aspect-ratio:210/297;padding:0;container-type:inline-size;overflow:hidden}.page .cell{font-size:5.55cqw}.preview-pages{width:100%}
+     .preview.page{position:relative;aspect-ratio:210/297;padding:0;container-type:inline-size;overflow:hidden}.page .cell{font-size:6.83cqw}.preview-pages{width:100%}
 </style>""",unsafe_allow_html=True)
     # Stable single HTML component; Python side does no Supabase I/O on the startup path.
     @st.cache_resource(show_spinner=False)
